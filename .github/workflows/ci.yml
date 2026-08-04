@@ -10,5 +10,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 24.4.1 }
-      - run: node --test tests/node/*.test.cjs
-      - run: node scripts/assemble-kernels.cjs --check
+      - name: Install arm64 compiler build dependencies
+        if: runner.arch == 'ARM64'
+        run: sudo apt-get update && sudo apt-get install -y cabal-install ghc zlib1g-dev libgmp-dev
+      - run: node scripts/verify.cjs
+      - run: node scripts/verify-provenance.cjs

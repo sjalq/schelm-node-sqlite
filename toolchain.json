@@ -1,0 +1,28 @@
+{
+  "elmCompilerRepository": "https://github.com/sjalq/schelm-elm-compiler.git",
+  "elmCompilerCommit": "76bbe44424106c96f915cb24cd7f50d69f5cee0e",
+  "elmCompilerTree": "15033f85bf175de5a51de9e8167202d88a5667ed",
+  "compilerBundleSha256": "2f7ac9ad53d7c2c5a8b0abd3b9b528aa8f0b0e23a17ab14444faff895ce5ec79",
+  "publicPackageSeedSha256": "59c3cd6ba9126cb77d1e4b4f09e0c7b91a32bb3ee9b7e40be424f482657cb74e",
+  "elmTest": {
+    "version": "0.19.2-0",
+    "archive": "elm-test-0.19.2-0.tgz",
+    "sha256": "bef1b9a7a8898270bca1de913febadd8ad891bdfa4813810437ee28ab66901c6"
+  },
+  "elmLanguageVersion": "0.19.2",
+  "nodeVersion": "24.4.1",
+  "compilers": {
+    "linux-x64": {
+      "mode": "vendored",
+      "file": "elm-76bbe44424106c96f915cb24cd7f50d69f5cee0e-linux-x64",
+      "sha256": "69987adf7062562b6e6dfd60b6709be3a06feeb90b096b9c84f673f2b97d8654"
+    },
+    "linux-arm64": {
+      "mode": "source",
+      "commit": "76bbe44424106c96f915cb24cd7f50d69f5cee0e",
+      "tree": "15033f85bf175de5a51de9e8167202d88a5667ed",
+      "build": "cabal v2-build exe:elm; cabal list-bin exe:elm"
+    }
+  },
+  "claim": "The x64 executable hash proves artifact integrity. arm64 is deterministically selected by architecture and built from the pinned, bundle-verified source; bit-identical cross-builder output is not claimed."
+}

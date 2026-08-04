@@ -20,6 +20,7 @@ import Schelm.Node.Sqlite.Internal.Runtime as Runtime
 import Task
 import Schelm.Node.Sqlite.Decode as Decode
 import Schelm.Node.Sqlite.Internal as Internal
+import Schelm.Node.Sqlite.Int64 as Int64
 
 
 type Database = FileDatabase String | MemoryDatabase String
@@ -88,15 +89,10 @@ isTransactionControl raw =
         Just first -> List.any ((==) first) [ "BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE" ]
         Nothing -> False
 
-int64FromDecimal raw = if canonical raw then Ok (Internal.Int64 raw) else Err InvalidInt64
+int64FromDecimal raw = if Int64.canonical raw then Ok (Internal.Int64 raw) else Err InvalidInt64
 int64ToDecimal (Internal.Int64 raw) = raw
 int64FromInt n = Internal.Int64 (String.fromInt n)
 int64ToInt (Internal.Int64 raw) = String.toInt raw
-canonical raw =
-    case String.toInt raw of
-        Just _ -> not (String.startsWith "+" raw) && raw /= "-0" && (raw == "0" || not (String.startsWith "0" raw))
-        Nothing -> raw == "9223372036854775807" || raw == "-9223372036854775808"
-
 null = Internal.Null
 int = int64FromInt >> Internal.Integer
 int64 = Internal.Integer

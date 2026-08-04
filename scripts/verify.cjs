@@ -1,8 +1,9 @@
 'use strict';
-const cp=require('node:child_process'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),os=require('node:os');
-const root=path.resolve(__dirname,'..'),toolRoot='/home/s.dormehl/git/schelm/.worktrees/program-foundation/packages/node-http-client/.worktrees/schelm-node-http-client-v1',elm=path.join(toolRoot,'vendor/toolchain/elm-76bbe44424106c96f915cb24cd7f50d69f5cee0e-linux-x64');
+const cp=require('node:child_process'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),os=require('node:os'),toolchain=require('./toolchain.cjs');
+const root=path.resolve(__dirname,'..'),elm=toolchain.compiler();
 function run(command,args,cwd=root,env=process.env){console.log('+',command,...args);cp.execFileSync(command,args,{cwd,env,stdio:'inherit'});}
-run(process.execPath,['scripts/assemble-kernels.cjs','--check']);run(process.execPath,['--test',...fs.readdirSync(path.join(root,'tests/node')).filter(x=>x.endsWith('.test.cjs')).map(x=>'tests/node/'+x)]);
+run(process.execPath,['scripts/assemble-kernels.cjs','--check']);run(process.execPath,['scripts/run-elm-tests.cjs']);run(process.execPath,['--test',...fs.readdirSync(path.join(root,'tests/node')).filter(x=>x.endsWith('.test.cjs')).map(x=>'tests/node/'+x)]);
 const home=cp.execFileSync(process.execPath,['scripts/prepare-overlay.cjs'],{cwd:root,encoding:'utf8'}),env={...process.env,ELM_HOME:home};
 run(elm,['make','src/Main.elm','--output=../../build/runtime-debug.js','--debug'],path.join(root,'fixture-apps/runtime'),env);run(elm,['make','src/Main.elm','--output=../../build/runtime-optimize.js','--optimize'],path.join(root,'fixture-apps/runtime'),env);
+const apiDir=path.join(root,'design-fixtures/api-contract/app');run(elm,['make','Main.elm','--output='+path.join(root,'build/api-contract-debug.js'),'--debug'],apiDir,{...process.env,ELM_HOME:home});run(elm,['make','Main.elm','--output='+path.join(root,'build/api-contract-optimize.js'),'--optimize'],apiDir,{...process.env,ELM_HOME:home});
 const a=path.join(root,'build/a.tar.gz'),b=path.join(root,'build/b.tar.gz');run(process.execPath,['scripts/build-archive.cjs',a]);run(process.execPath,['scripts/build-archive.cjs',b]);const hash=p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');if(hash(a)!==hash(b))throw new Error('archive not reproducible');console.log('archive-sha256='+hash(a),'node='+process.version,'sqlite='+process.versions.sqlite,'arch='+os.arch());

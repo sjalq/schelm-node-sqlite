@@ -1,9 +1,6 @@
 "use strict";
-const fs=require("node:fs"),path=require("node:path"),os=require("node:os"),cp=require("node:child_process"),crypto=require("node:crypto");
-const root=path.resolve(__dirname,".."),tool=JSON.parse(fs.readFileSync("/home/s.dormehl/git/schelm/.worktrees/program-foundation/packages/node-http-client/.worktrees/schelm-node-http-client-v1/toolchain.json","utf8"));
-const archive="/home/s.dormehl/git/schelm/.worktrees/program-foundation/packages/node-http-client/.worktrees/schelm-node-http-client-v1/vendor/toolchain/public-packages-0.19.2.tar.gz";
-function sha(p){return crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");}
-if(sha(archive)!==tool.publicPackageSeedSha256)throw new Error("public seed hash mismatch");
+const fs=require("node:fs"),path=require("node:path"),cp=require("node:child_process"),crypto=require("node:crypto"),toolchain=require("./toolchain.cjs");
+const root=path.resolve(__dirname,".."),tool=toolchain.config,archive=toolchain.packageSeed();
 const key=crypto.createHash("sha256").update(JSON.stringify(tool)).digest("hex"),cache=path.join(root,"build/cache",key),lock=cache+".lock";
 fs.mkdirSync(path.dirname(cache),{recursive:true});
 if(!fs.existsSync(cache)){
