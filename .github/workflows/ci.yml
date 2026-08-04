@@ -1,0 +1,14 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  verify:
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24.4.1 }
+      - run: node --test tests/node/*.test.cjs
+      - run: node scripts/assemble-kernels.cjs --check

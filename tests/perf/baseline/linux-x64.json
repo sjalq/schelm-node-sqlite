@@ -1,0 +1,7 @@
+{
+  "platform": "linux-x64",
+  "node": "24.4.1",
+  "sqlite": "3.50.2",
+  "warmP99UpperMs": 100,
+  "note": "Portable correctness ceiling. Per-run p50/p95/p99 evidence is printed by performance.test.cjs."
+}

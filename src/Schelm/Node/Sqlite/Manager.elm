@@ -32,7 +32,8 @@ type alias Job msg =
 
 
 type Database msg
-    = Starting Encode.Value (Queue (Job msg))
+    = Pending Encode.Value (Queue (Job msg))
+    | Starting Encode.Value (Queue (Job msg))
     | Ready Encode.Value Runtime.Handle Int (Maybe (Active msg)) (Queue (Job msg))
 
 
@@ -130,6 +131,9 @@ applyCommand router cmd state =
 
 admit router key options job state =
     case Dict.get key state.databases of
+        Just (Pending existing queue) ->
+            Task.succeed { state | databases = Dict.insert key (Pending existing (enqueue job queue)) state.databases }
+
         Just (Starting existing queue) ->
             Task.succeed { state | databases = Dict.insert key (Starting existing (enqueue job queue)) state.databases }
 
@@ -141,8 +145,8 @@ admit router key options job state =
             Task.succeed { state | databases = Dict.insert key (Ready existing handle rid (Just active) (enqueue job queue)) state.databases }
 
         Nothing ->
-            if Dict.size state.databases >= 8 then
-                Platform.sendToApp router job.rejected |> Task.andThen (\_ -> Task.succeed (forget job.operation state))
+            if workerCount state >= 8 then
+                Task.succeed { state | databases = Dict.insert key (Pending options (singleton job)) state.databases }
 
             else
                 startDatabase router key options (singleton job) state
@@ -162,7 +166,7 @@ startDatabase router key options queue state =
 schedule router state =
     case dequeue state.ready of
         Nothing ->
-            Task.succeed state
+            rotateIdle router state
 
         Just ( key, rest ) ->
             case Dict.get key state.databases of
@@ -291,6 +295,12 @@ cancelQueued router key operationId state =
 
 removeFromDatabase target database =
     case database of
+        Pending options queue ->
+            let
+                ( next, found ) = removeQueue target queue
+            in
+            ( Pending options next, found )
+
         Starting options queue ->
             let
                 ( next, found ) = removeQueue target queue
@@ -339,6 +349,7 @@ queueToList queue =
 
 databaseQueueSize key state =
     case Dict.get key state.databases of
+        Just (Pending _ queue) -> queue.size
         Just (Starting _ queue) -> queue.size
         Just (Ready _ _ _ _ queue) -> queue.size
         Nothing -> 0
@@ -385,6 +396,73 @@ removeQueue target queue =
                 ( enqueue job kept, found )
     in
     List.foldl step ( empty, Nothing ) (queueToList queue)
+
+
+workerCount state =
+    Dict.foldl
+        (\_ database total ->
+            case database of
+                Pending _ _ ->
+                    total
+
+                Starting _ _ ->
+                    total + 1
+
+                Ready _ _ _ _ _ ->
+                    total + 1
+        )
+        0
+        state.databases
+
+
+rotateIdle router state =
+    case pendingDatabase state of
+        Nothing ->
+            Task.succeed state
+
+        Just ( pendingKey, options, pendingQueue ) ->
+            case idleDatabase state of
+                Nothing ->
+                    Task.succeed state
+
+                Just ( idleKey, handle ) ->
+                    Runtime.close handle
+                        |> Task.andThen
+                            (\_ ->
+                                startDatabase router pendingKey options pendingQueue
+                                    { state | databases = state.databases |> Dict.remove idleKey |> Dict.remove pendingKey }
+                            )
+
+
+pendingDatabase state =
+    Dict.foldl
+        (\key database found ->
+            case ( found, database ) of
+                ( Nothing, Pending options queue ) ->
+                    Just ( key, options, queue )
+
+                _ ->
+                    found
+        )
+        Nothing
+        state.databases
+
+
+idleDatabase state =
+    Dict.foldl
+        (\key database found ->
+            case ( found, database ) of
+                ( Nothing, Ready _ handle _ Nothing queue ) ->
+                    if queue.size == 0 then
+                        Just ( key, handle )
+                    else
+                        Nothing
+
+                _ ->
+                    found
+        )
+        Nothing
+        state.databases
 
 
 increment n =
