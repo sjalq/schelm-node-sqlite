@@ -278,7 +278,7 @@ encodeOptions (Options config) =
 databasePath db =
     case db of
         FileDatabase path -> path
-        MemoryDatabase name -> "file:schelm-" ++ name ++ "?mode=memory&cache=shared"
+        MemoryDatabase _ -> ":memory:"
 databaseKey (Options config) = databasePath config.database ++ if config.readOnly then "|ro" else "|rw"
 isReadOnly (Options config) = config.readOnly
 modeName mode =

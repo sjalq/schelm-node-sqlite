@@ -60,7 +60,7 @@ rejectJob job state = let (Operation n) = job.operation in { state | owners = Di
 dispatch router key handle rid job state =
     let (Operation operationId) = job.operation
         completion = job.run rid handle |> Task.andThen (\msg -> Platform.sendToSelf router (Completed key operationId rid msg))
-    in Process.spawn completion |> Task.map (\pid -> { state | databases = Dict.insert key (Ready handle (rid + 1002) (Just { operation = job.operation, pid = pid }) []) state.databases })
+    in Process.spawn completion |> Task.map (\pid -> { state | databases = Dict.insert key (Ready handle (rid + 1002) (Just { operation = job.operation, pid = pid }) (readyQueue state key)) state.databases })
 
 onSelfMsg router self state = case self of
     OpenFailed key -> Task.succeed { state | databases = Dict.remove key state.databases }
@@ -90,3 +90,8 @@ removeQueued key operationId state = case Dict.get key state.databases of
     Nothing -> state
 without target = List.filter (\job -> let (Operation n) = job.operation in n /= target)
 increment n = if n >= 9007199254740990 then 1 else n + 1
+
+readyQueue state key =
+    case Dict.get key state.databases of
+        Just (Ready _ _ _ queue) -> queue
+        _ -> []

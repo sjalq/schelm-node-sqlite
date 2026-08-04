@@ -3,3 +3,5 @@
 /design-fixtures/api-contract/app/elm-stuff/
 
 /design-fixtures/api-contract/app/build/
+/fixture-apps/*/elm-stuff/
+/fixture-apps/*/build/
