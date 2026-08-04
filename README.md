@@ -28,3 +28,15 @@ are frozen in `docs/design/05-design-revision-b.md` and
 
 This package intentionally does not expose connections, statements, cursors,
 or transaction tokens.
+
+## Verify a release candidate
+
+```sh
+node scripts/verify.cjs
+```
+
+The gate runs the deterministic 200-caller scheduler model, framed-transport and
+SQLite failure suites, performance evidence, pinned Elm 0.19.2 debug/optimized
+overlays (including `Cmd.map`), canonical kernel assembly, and two-byte-identical
+package archives. See [`docs/design/07-self-audit.md`](docs/design/07-self-audit.md)
+for the package-completion audit and its deliberately stated residuals.

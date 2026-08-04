@@ -1,0 +1,5 @@
+'use strict';
+const fs=require('node:fs'),path=require('node:path'),cp=require('node:child_process'),crypto=require('node:crypto');const root=path.resolve(__dirname,'..'),p=JSON.parse(fs.readFileSync(path.join(root,'docs/provenance/final.json'))),sha=x=>crypto.createHash('sha256').update(fs.readFileSync(x)).digest('hex');
+const commit=cp.execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim();if(p.commit!==commit)throw new Error('provenance commit mismatch');
+for(const[k,file]of Object.entries({workerSha256:'runtime/worker.cjs',supervisorSha256:'runtime/supervisor.cjs',assembledKernelSha256:'src/Elm/Kernel/SchelmSqlite.js'}))if(p.artifacts[k]!==sha(path.join(root,file)))throw new Error(k+' mismatch');
+const archive=path.join(root,'build/provenance-check.tar.gz');cp.execFileSync(process.execPath,['scripts/build-archive.cjs',archive],{cwd:root,stdio:'inherit'});if(p.artifacts.archiveSha256!==sha(archive))throw new Error('archive mismatch');console.log('provenance verified for '+commit);
