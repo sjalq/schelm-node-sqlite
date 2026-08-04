@@ -7,6 +7,12 @@ requires an independent audit.
 
 ## Closed implementation blockers
 
+- `int64FromDecimal` now validates decimal syntax independently of host `Int`,
+  compares canonical magnitudes lexicographically against the exact signed
+  64-bit extrema, and rejects extrema neighbors, arbitrarily long values,
+  leading zeros, `+`, `-0`, whitespace, and non-digits. The canonical Elm gate
+  executes all of those cases.
+
 - The parent Elm effect manager owns admission, opaque operations, physical
   queues, per-database FIFO, a global ready-ring (one database quantum per
   round), an eight-worker pool, idle-worker rotation, callback acknowledgement,
@@ -41,9 +47,12 @@ requires an independent audit.
 ## Executable evidence
 
 `node scripts/verify.cjs` is the package gate. It verifies canonical kernel
-assembly, runs Node tests, compiles debug and optimized overlays with the pinned
-Elm 0.19.2 compiler, builds two isolated deterministic archives, and compares
-archive hashes.
+assembly, executes Elm Int64/API/decoder assertions, runs Node tests, compiles
+runtime and broad API/Cmd.map overlays in debug and optimize with the pinned Elm
+0.19.2 compiler, builds two isolated deterministic archives, and compares
+archive hashes. The toolchain is repository-local: x64 verifies a vendored
+compiler hash; arm64 verifies the pinned compiler bundle commit/tree and builds
+that source with Cabal. No unrelated checkout is consulted.
 
 The checked suites cover:
 

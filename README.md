@@ -35,8 +35,10 @@ or transaction tokens.
 node scripts/verify.cjs
 ```
 
-The gate runs the deterministic 200-caller scheduler model, framed-transport and
-SQLite failure suites, performance evidence, pinned Elm 0.19.2 debug/optimized
-overlays (including `Cmd.map`), canonical kernel assembly, and two-byte-identical
-package archives. See [`docs/design/07-self-audit.md`](docs/design/07-self-audit.md)
+The self-contained gate runs Elm Int64/API/decoder assertions, the deterministic
+200-caller scheduler model, framed-transport and SQLite failure suites,
+performance evidence, pinned Elm 0.19.2 debug/optimized runtime and broad API
+overlays (including `Cmd.map`), canonical kernel assembly, and two byte-identical
+package archives. x64 uses the hash-verified vendored compiler; arm64 builds the
+same pinned commit/tree from the repository-vendored compiler bundle. See [`docs/design/07-self-audit.md`](docs/design/07-self-audit.md)
 for the package-completion audit and its deliberately stated residuals.
