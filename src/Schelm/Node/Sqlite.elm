@@ -165,6 +165,9 @@ queryMaybe callbacks_ options_ query_ =
 transaction : Callbacks (Result (TransactionFailure domainError) a) msg -> Options -> TransactionMode -> TransactionProgram domainError a -> Cmd msg
 transaction callbacks_ options_ mode program =
     Manager.submit (databaseKey options_) (encodeOptions options_) callbacks_.onStarted
+        (\operation -> callbacks_.onFinished operation (Err (Error AdmissionRejected "queue admission rejected" 0)))
+        (\operation -> callbacks_.onFinished operation (Err (Error CancelledBeforeDispatch "cancelled before dispatch" 0)))
+        (\operation -> callbacks_.onFinished operation (Err (Error TransactionOutcomeUnknown "transaction worker replaced during cancellation" 0)))
         (\operation requestId handle ->
             transactionTask options_ handle requestId mode program
                 |> settle callbacks_.onFinished operation
@@ -175,6 +178,9 @@ cancel = Manager.cancel
 
 submit callbacks_ options_ taskFactory =
     Manager.submit (databaseKey options_) (encodeOptions options_) callbacks_.onStarted
+        (\operation -> callbacks_.onFinished operation (Err (Error AdmissionRejected "queue admission rejected" 0)))
+        (\operation -> callbacks_.onFinished operation (Err (Error CancelledBeforeDispatch "cancelled before dispatch" 0)))
+        (\operation -> callbacks_.onFinished operation (Err (Error OperationOutcomeUnknown "dispatched operation cancelled; worker replaced" 0)))
         (\operation requestId handle -> taskFactory handle requestId |> settle callbacks_.onFinished operation)
 
 settle finished operation task =
@@ -316,5 +322,6 @@ runtimeError raw =
             "worker-memory-exceeded" -> WorkerMemoryExceeded
             "unsupported-runtime" -> UnsupportedRuntime
             "interrupted" -> Interrupted
+            "limit-exceeded" -> LimitExceeded
             _ -> IoFailure
     in Error kind_ raw.message raw.code

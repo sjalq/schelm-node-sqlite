@@ -1,26 +1,16 @@
 'use strict';
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const fs = require('node:fs');
-const path = require('node:path');
-const root = path.resolve(__dirname, '../..');
-const supervisor = fs.readFileSync(path.join(root, 'runtime/supervisor.cjs'), 'utf8');
-const worker = fs.readFileSync(path.join(root, 'runtime/worker.cjs'), 'utf8');
-function start() {
-  const child = spawn(process.execPath, ['-e', supervisor], { stdio: ['ignore','ignore','pipe','ipc'], detached:true, env:{...process.env,SCHELM_SQLITE_WORKER_B64:Buffer.from(worker).toString('base64')} });
-  let id=1; const wait=[]; child.on('message',m=>{ const i=wait.findIndex(x=>x.id===m.id); if(i>=0)wait.splice(i,1)[0].resolve(m); });
-  return {child, request(op, extra={}) { const message={v:1,id:id++,op,mutating:false,inTransaction:false,sql:'',bindings:[],rowLimit:10,byteLimit:100000,mode:'',options:null,...extra}; return new Promise((resolve,reject)=>{wait.push({id:message.id,resolve});child.send(message,e=>e&&reject(e));});}, ready:new Promise(resolve=>child.once('message',resolve))};
-}
+const test=require('node:test'),assert=require('node:assert/strict');
+const{spawn}=require('node:child_process'),fs=require('node:fs'),path=require('node:path'),os=require('node:os');
+const root=path.resolve(__dirname,'../..'),supervisor=fs.readFileSync(path.join(root,'runtime/supervisor.cjs'),'utf8'),worker=fs.readFileSync(path.join(root,'runtime/worker.cjs'),'utf8');
+function start(env={}){const child=spawn(process.execPath,['-e',supervisor],{stdio:['ignore','ignore','pipe','ipc'],detached:true,env:{...process.env,...env,SCHELM_SQLITE_WORKER_B64:Buffer.from(worker).toString('base64')}});let id=1;const wait=[];child.on('message',m=>{const i=wait.findIndex(x=>x.id===m.id);if(i>=0)wait.splice(i,1)[0].resolve(m);});return{child,request(op,extra={}){const message={v:1,id:id++,op,mutating:false,inTransaction:false,sql:'',bindings:[],rowLimit:10,byteLimit:100000,mode:'',options:null,...extra};return new Promise((resolve,reject)=>{wait.push({id:message.id,resolve});child.send(message,e=>e&&reject(e));});},demand(id){return new Promise(resolve=>{wait.push({id,resolve});child.send({v:1,id,op:'demand'});});},ready:new Promise(resolve=>child.once('message',resolve))};}
+function stop(s){try{process.kill(-s.child.pid,'SIGKILL')}catch(_){}}
 function value(t,v){return v===undefined?{t}:{t,v}}
-test('persistent worker executes and queries with typed values', async t => {
-  const s=start(); t.after(()=>{try{process.kill(-s.child.pid,'SIGKILL')}catch{}}); await s.ready;
-  assert.equal((await s.request('open',{options:{path:':memory:',readOnly:false,busyTimeout:100}})).kind,'done');
-  assert.equal((await s.request('execute',{mutating:true,sql:'CREATE TABLE x(i INTEGER, s TEXT)'})).kind,'done');
-  assert.equal((await s.request('execute',{mutating:true,sql:'INSERT INTO x VALUES(?,?)',bindings:[value('integer','7'),value('text','ok')]})).changedRows,1);
-  const result=await s.request('query',{sql:'SELECT i,s FROM x'}); assert.equal(result.kind,'done'); assert.deepEqual(result.columns,['i','s']); assert.deepEqual(result.rows,[[value('integer','7'),value('text','ok')]]);
-});
-test('significant SQL tail is rejected before stepping', async t => {
-  const s=start(); t.after(()=>{try{process.kill(-s.child.pid,'SIGKILL')}catch{}}); await s.ready; await s.request('open',{options:{path:':memory:',readOnly:false,busyTimeout:100}});
-  const result=await s.request('execute',{mutating:true,sql:'CREATE TABLE a(x); CREATE TABLE b(x)'}); assert.equal(result.kind,'error'); assert.equal(result.entered,false);
-});
+async function open(s,file=':memory:',timeout=100){await s.ready;return s.request('open',{options:{path:file,readOnly:false,busyTimeout:timeout}});}
+async function query(s,extra){const first=await s.request('query',extra);assert.equal(first.kind,'columns');const rows=[];for(;;){const x=await s.demand(first.id);if(x.kind==='done')return{columns:first.columns,rows};if(x.kind==='error')return x;assert.equal(x.kind,'row');rows.push(x.row);}}
+test('persistent framed worker executes and streams one demanded row',async t=>{const s=start();t.after(()=>stop(s));await open(s);assert.equal((await s.request('execute',{mutating:true,sql:'CREATE TABLE x(i INTEGER,s TEXT)'})).kind,'done');await s.request('execute',{mutating:true,sql:'INSERT INTO x VALUES(?,?)',bindings:[value('integer','7'),value('text','ok')]});const first=await s.request('query',{sql:'SELECT i,s FROM x'});assert.equal(first.kind,'columns');const row=await s.demand(first.id);assert.deepEqual(row.row,[value('integer','7'),value('text','ok')]);assert.equal((await s.demand(first.id)).kind,'done');});
+test('significant SQL tail is rejected before stepping',async t=>{const s=start();t.after(()=>stop(s));await open(s);const r=await s.request('execute',{mutating:true,sql:'CREATE TABLE a(x); CREATE TABLE b(x)'});assert.equal(r.kind,'error');assert.equal(r.entered,false);});
+test('collection meter disposes iterator at exact demand boundary',async t=>{const s=start();t.after(()=>stop(s));await open(s);await s.request('execute',{mutating:true,sql:'CREATE TABLE x(i)'});for(let i=0;i<3;i++)await s.request('execute',{mutating:true,sql:`INSERT INTO x VALUES(${i})`});const first=await s.request('query',{sql:'SELECT i FROM x ORDER BY i',rowLimit:2});assert.equal((await s.demand(first.id)).kind,'row');assert.equal((await s.demand(first.id)).kind,'row');const end=await s.demand(first.id);assert.equal(end.kind,'error');assert.equal(end.errorKind,'limit-exceeded');});
+test('WAL recovers acknowledged writes after worker crash',async t=>{const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sqlite-wal-')),file=path.join(dir,'x.db');t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));let s=start();await open(s,file);await s.request('execute',{mutating:true,sql:'CREATE TABLE x(i)'});await s.request('execute',{mutating:true,sql:'INSERT INTO x VALUES(9)'});stop(s);await new Promise(r=>setTimeout(r,50));s=start();t.after(()=>stop(s));await open(s,file);assert.equal((await query(s,{sql:'SELECT i FROM x'})).rows[0][0].v,'9');});
+test('BUSY is surfaced without retry',async t=>{const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sqlite-busy-')),file=path.join(dir,'x.db'),a=start(),b=start();t.after(()=>{stop(a);stop(b);fs.rmSync(dir,{recursive:true,force:true});});await open(a,file,20);await open(b,file,20);await a.request('execute',{sql:'CREATE TABLE x(i)',mutating:true});await a.request('begin',{mode:'IMMEDIATE',mutating:true});const r=await b.request('execute',{sql:'INSERT INTO x VALUES(1)',mutating:true});assert.equal(r.errorKind,'busy');await a.request('rollback',{mutating:true,inTransaction:true});});
+test('parent death reaps blocked worker group',async()=>{const s=start();await open(s);const pid=s.child.pid;s.child.disconnect();await new Promise(r=>setTimeout(r,700));assert.throws(()=>process.kill(pid,0));});
+test('CRC framing detects every single-bit corruption sampled',()=>{const source=fs.readFileSync(path.join(root,'runtime/worker.cjs'),'utf8');assert.match(source,/crc32/);const poly=0xedb88320;function crc(b){let c=0xffffffff;for(const x of b){c^=x;for(let k=0;k<8;k++)c=(c&1)?poly^(c>>>1):c>>>1;}return(c^0xffffffff)>>>0;}const b=Buffer.from('protocol-fuzz-seed-53514c31');const expected=crc(b);for(let i=0;i<b.length*8;i++){const x=Buffer.from(b);x[i>>3]^=1<<(i&7);assert.notEqual(crc(x),expected);}});

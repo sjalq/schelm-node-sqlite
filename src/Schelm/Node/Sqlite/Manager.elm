@@ -3,95 +3,389 @@ effect module Schelm.Node.Sqlite.Manager where { command = MyCmd } exposing (Ope
 import Dict exposing (Dict)
 import Json.Encode as Encode
 import Platform
-import Platform.Cmd exposing (Cmd)
 import Process
+import Set exposing (Set)
 import Schelm.Node.Sqlite.Internal.Runtime as Runtime
 import Task exposing (Task)
 
 
-type Operation = Operation Int
+type Operation
+    = Operation Int
 
-type MyCmd msg = Submit String Encode.Value (Operation -> Int -> Runtime.Handle -> Task Never msg) (Operation -> msg) | Cancel Operation
 
-type alias Job msg = { operation : Operation, run : Int -> Runtime.Handle -> Task Never msg }
-type Database msg = Starting Encode.Value (List (Job msg)) | Ready Runtime.Handle Int (Maybe Active) (List (Job msg))
-type alias Active = { operation : Operation, pid : Process.Id }
-type alias State msg = { nextOperation : Int, databases : Dict String (Database msg), owners : Dict Int String, queued : Int }
-type SelfMsg msg = Opened String Runtime.Handle | OpenFailed String | Completed String Int Int msg
+type MyCmd msg
+    = Submit String Encode.Value (Operation -> Int -> Runtime.Handle -> Task Never msg) (Operation -> msg) (Operation -> msg) (Operation -> msg) (Operation -> msg)
+    | Cancel Operation
 
-type alias MyRouter msg = Platform.Router msg (SelfMsg msg)
 
-submit key options onStarted run = command (Submit key options run onStarted)
-cancel operation = command (Cancel operation)
-cmdMap fn cmd = case cmd of
-    Submit key options run started -> Submit key options (\op rid handle -> run op rid handle |> Task.map fn) (started >> fn)
-    Cancel op -> Cancel op
+type alias Queue a =
+    { front : List a, back : List a, size : Int }
 
-init = Task.succeed { nextOperation = 1, databases = Dict.empty, owners = Dict.empty, queued = 0 }
 
-onEffects router commands state = applyCommands router commands state
-applyCommands router commands state = case commands of
-    [] -> Task.succeed state
-    first :: rest -> applyCommand router first state |> Task.andThen (applyCommands router rest)
+type alias Job msg =
+    { operation : Operation
+    , run : Int -> Runtime.Handle -> Task Never msg
+    , rejected : msg
+    , cancelled : msg
+    , interrupted : msg
+    }
 
-applyCommand router cmd state = case cmd of
-    Cancel (Operation operationId) -> cancelOwned operationId state
-    Submit key options run started ->
-        if state.queued >= 1024 then Platform.sendToApp router (started (Operation 0)) |> Task.andThen (\_ -> Task.succeed state)
-        else
-            let op = Operation state.nextOperation
-                job = { operation = op, run = run op }
-                next = { state | nextOperation = increment state.nextOperation, owners = Dict.insert state.nextOperation key state.owners, queued = state.queued + 1 }
-            in Platform.sendToApp router (started op) |> Task.andThen (\_ -> admit router key options job next)
 
-admit router key options job state = case Dict.get key state.databases of
-    Just (Starting existing queue) -> Task.succeed { state | databases = Dict.insert key (Starting existing (boundedEnqueue job queue)) state.databases }
-    Just (Ready handle rid Nothing queue) -> dispatch router key handle rid job { state | databases = Dict.insert key (Ready handle rid Nothing queue) state.databases }
-    Just (Ready handle rid active queue) -> Task.succeed { state | databases = Dict.insert key (Ready handle rid active (boundedEnqueue job queue)) state.databases }
-    Nothing ->
-        if Dict.size state.databases >= 8 then Task.succeed (rejectJob job state)
-        else
-            let open = Runtime.start options |> Task.andThen (Opened key >> Platform.sendToSelf router) |> Task.onError (\_ -> Platform.sendToSelf router (OpenFailed key))
-            in Process.spawn open |> Task.map (\_ -> { state | databases = Dict.insert key (Starting options [ job ]) state.databases })
+type Database msg
+    = Starting Encode.Value (Queue (Job msg))
+    | Ready Encode.Value Runtime.Handle Int (Maybe (Active msg)) (Queue (Job msg))
 
-boundedEnqueue job queue = if List.length queue >= 256 then queue else queue ++ [ job ]
-rejectJob job state = let (Operation n) = job.operation in { state | owners = Dict.remove n state.owners, queued = max 0 (state.queued - 1) }
 
-dispatch router key handle rid job state =
-    let (Operation operationId) = job.operation
-        completion = job.run rid handle |> Task.andThen (\msg -> Platform.sendToSelf router (Completed key operationId rid msg))
-    in Process.spawn completion |> Task.map (\pid -> { state | databases = Dict.insert key (Ready handle (rid + 1002) (Just { operation = job.operation, pid = pid }) (readyQueue state key)) state.databases })
+type alias Active msg =
+    { job : Job msg, pid : Process.Id }
 
-onSelfMsg router self state = case self of
-    OpenFailed key -> Task.succeed { state | databases = Dict.remove key state.databases }
-    Opened key handle -> case Dict.get key state.databases of
-        Just (Starting _ (job :: rest)) -> dispatch router key handle 2 job { state | databases = Dict.insert key (Ready handle 2 Nothing rest) state.databases }
-        _ -> Runtime.close handle |> Task.andThen (\_ -> Task.succeed state)
-    Completed key operationId rid message ->
-        case Dict.get key state.databases of
-            Just (Ready handle next (Just active) queue) ->
-                let (Operation activeId) = active.operation in
-                if activeId /= operationId then Task.succeed state
-                else
-                    let settled = { state | owners = Dict.remove operationId state.owners, queued = max 0 (state.queued - 1), databases = Dict.insert key (Ready handle next Nothing queue) state.databases }
-                    in Platform.sendToApp router message |> Task.andThen (\_ -> case queue of
-                        [] -> Task.succeed settled
-                        first :: rest -> dispatch router key handle next first { settled | databases = Dict.insert key (Ready handle next Nothing rest) settled.databases })
-            _ -> Task.succeed state
 
-cancelOwned operationId state = case Dict.get operationId state.owners of
-    Nothing -> Task.succeed state
-    Just key -> case Dict.get key state.databases of
-        Just (Ready handle rid (Just active) queue) -> let (Operation activeId) = active.operation in if activeId == operationId then Process.kill active.pid |> Task.map (\_ -> { state | databases = Dict.remove key state.databases, owners = Dict.remove operationId state.owners, queued = max 0 (state.queued - 1) }) else Task.succeed (removeQueued key operationId state)
-        _ -> Task.succeed (removeQueued key operationId state)
-removeQueued key operationId state = case Dict.get key state.databases of
-    Just (Starting options queue) -> { state | databases = Dict.insert key (Starting options (without operationId queue)) state.databases, owners = Dict.remove operationId state.owners, queued = max 0 (state.queued - 1) }
-    Just (Ready handle rid active queue) -> { state | databases = Dict.insert key (Ready handle rid active (without operationId queue)) state.databases, owners = Dict.remove operationId state.owners, queued = max 0 (state.queued - 1) }
-    Nothing -> state
-without target = List.filter (\job -> let (Operation n) = job.operation in n /= target)
-increment n = if n >= 9007199254740990 then 1 else n + 1
+type alias State msg =
+    { nextOperation : Int
+    , databases : Dict String (Database msg)
+    , owners : Dict Int String
+    , queued : Int
+    , ready : Queue String
+    , readySet : Set String
+    }
+
+
+type SelfMsg msg
+    = Opened String Runtime.Handle
+    | OpenFailed String
+    | Completed String Int Int msg
+
+
+type alias MyRouter msg =
+    Platform.Router msg (SelfMsg msg)
+
+
+submit key options onStarted onRejected onCancelled onInterrupted run =
+    command (Submit key options run onStarted onRejected onCancelled onInterrupted)
+
+
+cancel operation =
+    command (Cancel operation)
+
+
+cmdMap fn cmd =
+    case cmd of
+        Submit key options run started rejected cancelled interrupted ->
+            Submit key options (\op rid handle -> run op rid handle |> Task.map fn) (started >> fn) (rejected >> fn) (cancelled >> fn) (interrupted >> fn)
+
+        Cancel op ->
+            Cancel op
+
+
+init =
+    Task.succeed { nextOperation = 1, databases = Dict.empty, owners = Dict.empty, queued = 0, ready = empty, readySet = Set.empty }
+
+
+onEffects router commands state =
+    applyCommands router commands state
+
+
+applyCommands router commands state =
+    case commands of
+        [] ->
+            schedule router state
+
+        first :: rest ->
+            applyCommand router first state |> Task.andThen (applyCommands router rest)
+
+
+applyCommand router cmd state =
+    case cmd of
+        Cancel (Operation operationId) ->
+            cancelOwned router operationId state
+
+        Submit key options run started rejected cancelled interrupted ->
+            let
+                op =
+                    Operation state.nextOperation
+
+                job =
+                    { operation = op
+                    , run = run op
+                    , rejected = rejected op
+                    , cancelled = cancelled op
+                    , interrupted = interrupted op
+                    }
+            in
+            Platform.sendToApp router (started op)
+                |> Task.andThen
+                    (\_ ->
+                        if state.queued >= 1024 || databaseQueueSize key state >= 256 then
+                            Platform.sendToApp router job.rejected |> Task.andThen (\_ -> Task.succeed state)
+
+                        else
+                            admit router key options job
+                                { state
+                                    | nextOperation = increment state.nextOperation
+                                    , owners = Dict.insert state.nextOperation key state.owners
+                                    , queued = state.queued + 1
+                                }
+                    )
+
+
+admit router key options job state =
+    case Dict.get key state.databases of
+        Just (Starting existing queue) ->
+            Task.succeed { state | databases = Dict.insert key (Starting existing (enqueue job queue)) state.databases }
+
+        Just (Ready existing handle rid Nothing queue) ->
+            Task.succeed
+                (addReady key { state | databases = Dict.insert key (Ready existing handle rid Nothing (enqueue job queue)) state.databases })
+
+        Just (Ready existing handle rid (Just active) queue) ->
+            Task.succeed { state | databases = Dict.insert key (Ready existing handle rid (Just active) (enqueue job queue)) state.databases }
+
+        Nothing ->
+            if Dict.size state.databases >= 8 then
+                Platform.sendToApp router job.rejected |> Task.andThen (\_ -> Task.succeed (forget job.operation state))
+
+            else
+                startDatabase router key options (singleton job) state
+
+
+startDatabase router key options queue state =
+    let
+        open =
+            Runtime.start options
+                |> Task.andThen (Opened key >> Platform.sendToSelf router)
+                |> Task.onError (\_ -> Platform.sendToSelf router (OpenFailed key))
+    in
+    Process.spawn open
+        |> Task.map (\_ -> { state | databases = Dict.insert key (Starting options queue) state.databases })
+
+
+schedule router state =
+    case dequeue state.ready of
+        Nothing ->
+            Task.succeed state
+
+        Just ( key, rest ) ->
+            case Dict.get key state.databases of
+                Just (Ready options handle rid Nothing queue) ->
+                    case dequeue queue of
+                        Nothing ->
+                            schedule router { state | ready = rest, readySet = Set.remove key state.readySet }
+
+                        Just ( job, remaining ) ->
+                            dispatch router key options handle rid job
+                                { state
+                                    | ready = rest
+                                    , readySet = Set.remove key state.readySet
+                                    , databases = Dict.insert key (Ready options handle rid Nothing remaining) state.databases
+                                }
+                                |> Task.andThen (schedule router)
+
+                _ ->
+                    schedule router { state | ready = rest }
+
+
+dispatch router key options handle rid job state =
+    let
+        (Operation operationId) =
+            job.operation
+
+        completion =
+            job.run rid handle |> Task.andThen (\msg -> Platform.sendToSelf router (Completed key operationId rid msg))
+    in
+    Process.spawn completion
+        |> Task.map
+            (\pid ->
+                { state
+                    | databases = Dict.insert key (Ready options handle (rid + 1) (Just { job = job, pid = pid }) (readyQueue state key)) state.databases
+                }
+            )
+
+
+onSelfMsg router self state =
+    case self of
+        OpenFailed key ->
+            case Dict.get key state.databases of
+                Just (Starting _ queue) ->
+                    settleQueue router queue { state | databases = Dict.remove key state.databases }
+
+                _ ->
+                    Task.succeed state
+
+        Opened key handle ->
+            case Dict.get key state.databases of
+                Just (Starting options queue) ->
+                    schedule router (addReady key { state | databases = Dict.insert key (Ready options handle 2 Nothing queue) state.databases })
+
+                _ ->
+                    Runtime.close handle |> Task.andThen (\_ -> Task.succeed state)
+
+        Completed key operationId _ message ->
+            case Dict.get key state.databases of
+                Just (Ready options handle next (Just active) queue) ->
+                    let
+                        (Operation activeId) =
+                            active.job.operation
+                    in
+                    if activeId /= operationId then
+                        Task.succeed state
+
+                    else
+                        let
+                            settled =
+                                forget active.job.operation
+                                    { state | databases = Dict.insert key (Ready options handle next Nothing queue) state.databases }
+                        in
+                        Platform.sendToApp router message
+                            |> Task.andThen (\_ -> schedule router (addReady key settled))
+
+                _ ->
+                    Task.succeed state
+
+
+cancelOwned router operationId state =
+    case Dict.get operationId state.owners of
+        Nothing ->
+            Task.succeed state
+
+        Just key ->
+            case Dict.get key state.databases of
+                Just (Ready options _ _ (Just active) queue) ->
+                    let
+                        (Operation activeId) =
+                            active.job.operation
+                    in
+                    if activeId == operationId then
+                        Process.kill active.pid
+                            |> Task.andThen (\_ -> Platform.sendToApp router active.job.interrupted)
+                            |> Task.andThen
+                                (\_ ->
+                                    startDatabase router key options queue
+                                        (forget active.job.operation { state | databases = Dict.remove key state.databases, ready = removeKey key state.ready, readySet = Set.remove key state.readySet })
+                                )
+
+                    else
+                        cancelQueued router key operationId state
+
+                _ ->
+                    cancelQueued router key operationId state
+
+
+cancelQueued router key operationId state =
+    case Dict.get key state.databases of
+        Just database ->
+            let
+                ( nextDatabase, removed ) =
+                    removeFromDatabase operationId database
+            in
+            case removed of
+                Just job ->
+                    Platform.sendToApp router job.cancelled
+                        |> Task.andThen (\_ -> Task.succeed (forget job.operation { state | databases = Dict.insert key nextDatabase state.databases }))
+
+                Nothing ->
+                    Task.succeed state
+
+        Nothing ->
+            Task.succeed state
+
+
+removeFromDatabase target database =
+    case database of
+        Starting options queue ->
+            let
+                ( next, found ) = removeQueue target queue
+            in
+            ( Starting options next, found )
+
+        Ready options handle rid active queue ->
+            let
+                ( next, found ) = removeQueue target queue
+            in
+            ( Ready options handle rid active next, found )
+
+
+settleQueue router queue state =
+    case dequeue queue of
+        Nothing ->
+            Task.succeed state
+
+        Just ( job, rest ) ->
+            Platform.sendToApp router job.interrupted
+                |> Task.andThen (\_ -> settleQueue router rest (forget job.operation state))
+
+
+forget (Operation operationId) state =
+    { state | owners = Dict.remove operationId state.owners, queued = max 0 (state.queued - 1) }
+
+
+addReady key state =
+    if Set.member key state.readySet then
+        state
+
+    else
+        { state | ready = enqueue key state.ready, readySet = Set.insert key state.readySet }
+
+
+removeKey key queue =
+    queue
+        |> queueToList
+        |> List.filter ((/=) key)
+        |> List.foldl enqueue empty
+
+
+queueToList queue =
+    queue.front ++ List.reverse queue.back
+
+
+databaseQueueSize key state =
+    case Dict.get key state.databases of
+        Just (Starting _ queue) -> queue.size
+        Just (Ready _ _ _ _ queue) -> queue.size
+        Nothing -> 0
+
 
 readyQueue state key =
     case Dict.get key state.databases of
-        Just (Ready _ _ _ queue) -> queue
-        _ -> []
+        Just (Ready _ _ _ _ queue) -> queue
+        _ -> empty
+
+
+empty =
+    { front = [], back = [], size = 0 }
+
+
+singleton value =
+    { front = [ value ], back = [], size = 1 }
+
+
+enqueue value queue =
+    { queue | back = value :: queue.back, size = queue.size + 1 }
+
+
+dequeue queue =
+    case queue.front of
+        first :: rest ->
+            Just ( first, { queue | front = rest, size = queue.size - 1 } )
+
+        [] ->
+            case List.reverse queue.back of
+                [] -> Nothing
+                first :: rest -> Just ( first, { front = rest, back = [], size = queue.size - 1 } )
+
+
+removeQueue target queue =
+    let
+        step job ( kept, found ) =
+            let
+                (Operation operationId) = job.operation
+            in
+            if operationId == target && found == Nothing then
+                ( kept, Just job )
+            else
+                ( enqueue job kept, found )
+    in
+    List.foldl step ( empty, Nothing ) (queueToList queue)
+
+
+increment n =
+    if n >= 9007199254740990 then 1 else n + 1
