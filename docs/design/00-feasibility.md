@@ -17,7 +17,7 @@ Run from this commit:
 
 ```sh
 node scripts/prepare-feasibility-overlay.cjs
-compiler=/home/s.dormehl/git/elm-compiler/.worktrees/schelm-kernel-author/result/bin/elm
+compiler=$(node -e "process.stdout.write(require('./scripts/toolchain.cjs').compiler())")
 (cd feasibility/app && ELM_HOME=../../build/elm-home "$compiler" make Main.elm --output=../../build/feasibility-debug.js)
 (cd feasibility/app && ELM_HOME=../../build/elm-home "$compiler" make Main.elm --output=../../build/feasibility-optimize.js --optimize)
 node feasibility/run.cjs

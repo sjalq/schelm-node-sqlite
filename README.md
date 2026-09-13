@@ -3,15 +3,22 @@
 Typed, bounded SQLite programs for Schelm on Node.js.
 
 The public API is callback-based `Cmd`: `execute`, `queryAll`, `queryOne`,
-`queryMaybe`, `transaction`, and explicit `cancel`. Elm owns operation identity,
-queues, decoding, transaction continuations, and settlement. SQLite runs only in
-a persistent supervised child process; the Elm/Node application thread never
-enters `DatabaseSync`.
+`queryMaybe`, `transaction`, `close`, and explicit `cancel`. Inspect `Error`
+with `errorKind`, `errorMessage`, and `errorCode`. `transactionAndThen` can
+change the program result type, so execute-then-query in one transaction is
+expressible. Elm owns operation identity, queues, decoding, transaction
+continuations, and settlement. SQLite runs only in a persistent supervised child
+process; the Elm/Node application thread never enters `DatabaseSync`. Call
+`close` when the database is finished so the supervisor child is released and
+the Node event loop can exit.
 
 See [`docs/recipes/cron-and-index.md`](docs/recipes/cron-and-index.md) for normal
 cron-store and search-index patterns. Design constraints and failure semantics
 are frozen in `docs/design/05-design-revision-b.md` and
-`docs/design/07-execution-manager-addendum.md`.
+`docs/design/07-execution-manager-addendum.md`. The 1.0.3 done-frame contract,
+tolerant decoding, begin-rollback, `close`, FIFO `Cmd.batch`, and the typed
+`transactionAndThen` change are in
+[`docs/design/08-1.0.3-frame-contract.md`](docs/design/08-1.0.3-frame-contract.md).
 
 ## Runtime contract
 
@@ -33,12 +40,21 @@ or transaction tokens.
 
 ```sh
 node scripts/verify.cjs
+node scripts/schelm-gate.cjs
 ```
 
-The self-contained gate runs Elm Int64/API/decoder assertions, the deterministic
-200-caller scheduler model, framed-transport and SQLite failure suites,
-performance evidence, pinned Elm 0.19.2 debug/optimized runtime and broad API
-overlays (including `Cmd.map`), canonical kernel assembly, and two byte-identical
-package archives. x64 uses the hash-verified vendored compiler; arm64 builds the
-same pinned commit/tree from the repository-vendored compiler bundle. See [`docs/design/07-self-audit.md`](docs/design/07-self-audit.md)
-for the package-completion audit and its deliberately stated residuals.
+`verify.cjs` is the self-contained Linux Elm 0.19.2 gate: Elm Int64/API/decoder
+assertions, the deterministic 200-caller scheduler model, framed-transport and
+SQLite failure suites, performance evidence, pinned compiler debug/optimized
+overlays (including `Cmd.map`), canonical kernel assembly, and two
+byte-identical package archives. x64 uses the hash-verified vendored compiler;
+arm64 builds the same pinned commit/tree from the repository-vendored compiler
+bundle.
+
+`schelm-gate.cjs` is the 1.0.3 Schelm compiler gate. It sets `SCHELM_HOME` to a
+temporary directory (never `~/.schelm`) and runs `~/.local/bin/schelm make
+--no-wire` in debug and `--optimize`. Both bundles execute `queryAll`,
+`queryOne`, `queryMaybe`, `transaction` (execute then query), FIFO `Cmd.batch`,
+and `close`, then must exit naturally. See
+[`docs/design/07-self-audit.md`](docs/design/07-self-audit.md) for the
+package-completion audit and its deliberately stated residuals.
