@@ -5,7 +5,8 @@ module Schelm.Node.Sqlite exposing
     , Value, null, int, int64, float, text, blob, Bindings, noBindings, bindings
     , Command, command, Query, query, CollectionLimit, collectionLimit
     , Operation, Callbacks, Changes, Error, ErrorKind(..)
-    , execute, queryAll, queryOne, queryMaybe, transaction, cancel
+    , errorKind, errorMessage, errorCode
+    , execute, queryAll, queryOne, queryMaybe, transaction, cancel, close
     , TransactionMode(..), TransactionProgram, TransactionFailure(..)
     , transactionSucceed, transactionFail, transactionMap, transactionAndThen
     , transactionExecute, transactionQueryOne
@@ -60,15 +61,15 @@ type TransactionMode = Deferred | Immediate | Exclusive
 type TransactionFailure domainError = DomainFailure domainError | SqlFailure Error
 
 type TransactionProgram domainError a
-    = TransactionProgram ((a -> TransactionStep domainError a) -> (domainError -> TransactionStep domainError a) -> TransactionStep domainError a)
+    = TransactionSucceed a
+    | TransactionFail domainError
+    | TransactionCommand Command (Changes -> TransactionProgram domainError a)
+    | TransactionOne String Bindings (Internal.Row -> Result Decode.Error (TransactionProgram domainError a))
 
 
-type TransactionStep domainError a
-    = TransactionDone
-    | TransactionSuccess a
-    | TransactionDomainFailure domainError
-    | TransactionCommand Command (Changes -> TransactionStep domainError a)
-    | TransactionOne String Bindings (Internal.Row -> Result Decode.Error (TransactionStep domainError a))
+errorKind (Error kind_ _ _) = kind_
+errorMessage (Error _ message _) = message
+errorCode (Error _ _ code) = code
 
 
 database raw = if String.isEmpty raw then Err Empty else if String.contains "\u{0000}" raw then Err ContainsNul else Ok (FileDatabase raw)
@@ -105,29 +106,28 @@ command = Internal.Command
 query = Internal.Query
 collectionLimit rows bytes_ = if rows < 1 || rows > 100000 || bytes_ < 1 || bytes_ > 8388608 then Err InvalidBound else Ok (CollectionLimit { rows = rows, bytes = bytes_ })
 
-transactionSucceed value_ = TransactionProgram (\onSuccess _ -> onSuccess value_)
-transactionFail error = TransactionProgram (\_ onFailure -> onFailure error)
+transactionSucceed value_ = TransactionSucceed value_
+transactionFail error = TransactionFail error
 transactionMap fn program = transactionAndThen (fn >> transactionSucceed) program
-transactionAndThen fn (TransactionProgram run) =
-    TransactionProgram
-        (\onSuccess onFailure ->
-            run
-                (\value_ ->
-                    let
-                        (TransactionProgram next) = fn value_
-                    in
-                    next onSuccess onFailure
-                )
-                onFailure
-        )
+transactionAndThen : (a -> TransactionProgram e b) -> TransactionProgram e a -> TransactionProgram e b
+transactionAndThen fn program =
+    case program of
+        TransactionSucceed value_ ->
+            fn value_
+
+        TransactionFail error ->
+            TransactionFail error
+
+        TransactionCommand command_ continue ->
+            TransactionCommand command_ (\changes -> transactionAndThen fn (continue changes))
+
+        TransactionOne source bindValues decodeContinue ->
+            TransactionOne source bindValues (\row -> Result.map (transactionAndThen fn) (decodeContinue row))
 transactionExecute command_ =
-    TransactionProgram (\onSuccess _ -> TransactionCommand command_ onSuccess)
+    TransactionCommand command_ TransactionSucceed
 transactionQueryOne (Internal.Query source bindValues decoder) =
-    TransactionProgram
-        (\onSuccess _ ->
-            TransactionOne source bindValues
-                (\row -> Internal.decode decoder row |> Result.map onSuccess)
-        )
+    TransactionOne source bindValues
+        (\row -> Internal.decode decoder row |> Result.map TransactionSucceed)
 
 
 execute : Callbacks Changes msg -> Options -> Command -> Cmd msg
@@ -172,6 +172,10 @@ transaction callbacks_ options_ mode program =
 cancel : Operation -> Cmd msg
 cancel = Manager.cancel
 
+close : Database -> (Result Error () -> msg) -> Cmd msg
+close db toMsg =
+    Manager.close (databasePath db) (toMsg (Ok ()))
+
 submit callbacks_ options_ taskFactory =
     Manager.submit (databaseKey options_) (encodeOptions options_) callbacks_.onStarted
         (\operation -> callbacks_.onFinished operation (Err (Error AdmissionRejected "queue admission rejected" 0)))
@@ -206,38 +210,35 @@ decodeRows ( decoder, columns, rows ) =
         |> Result.mapError (\problem_ -> Error DecodeFailed problem_.reason 0)
         |> resultTask
 
-transactionTask options_ handle requestId mode (TransactionProgram run) =
+transactionTask options_ handle requestId mode program =
     Runtime.request handle (runtimeRequest requestId "begin" True False "" [] 1 1 (modeName mode) (encodeOptions options_))
         |> Task.mapError runtimeError
-        |> Task.andThen (\_ -> interpretTransaction options_ handle (requestId + 1) 0 (run TransactionSuccess TransactionDomainFailure))
+        |> Task.onError (\error -> rollbackQuiet handle (requestId + 1) error)
+        |> Task.andThen (\_ -> interpretTransaction options_ handle (requestId + 1) 0 program)
 
-interpretTransaction options_ handle requestId instructions step =
+interpretTransaction options_ handle requestId instructions program =
     if instructions >= 1000 then
         rollbackThen handle requestId (Task.fail (Error LimitExceeded "transaction instruction limit" 0))
     else
-        case step of
-            TransactionDone ->
-                Runtime.request handle (runtimeRequest requestId "commit" True True "" [] 1 1 "" (encodeOptions options_))
-                    |> Task.mapError (\_ -> Error TransactionOutcomeUnknown "commit acknowledgement unavailable" 0)
-                    |> Task.map (always (Ok (unsafeTransactionValue step)))
-
-            TransactionSuccess value_ ->
+        case program of
+            TransactionSucceed value_ ->
                 Runtime.request handle (runtimeRequest requestId "commit" True True "" [] 1 1 "" (encodeOptions options_))
                     |> Task.mapError (\_ -> Error TransactionOutcomeUnknown "commit acknowledgement unavailable" 0)
                     |> Task.map (always (Ok value_))
 
-            TransactionDomainFailure reason ->
+            TransactionFail reason ->
                 Runtime.request handle (runtimeRequest requestId "rollback" True True "" [] 1 1 "" (encodeOptions options_))
                     |> Task.mapError (\_ -> Error TransactionOutcomeUnknown "rollback acknowledgement unavailable" 0)
                     |> Task.map (always (Err (DomainFailure reason)))
 
             TransactionCommand command_ continue ->
                 executeTask options_ True command_ handle requestId
-                    |> Task.andThen (continue >> interpretTransaction options_ handle (requestId + 1) (instructions + 1))
                     |> Task.onError (\error -> rollbackThen handle (requestId + 1) (Task.fail error))
+                    |> Task.andThen (\changes -> interpretTransaction options_ handle (requestId + 1) (instructions + 1) (continue changes))
 
             TransactionOne source bindValues decodeContinue ->
                 queryTask options_ True (CollectionLimit { rows = 2, bytes = 8388608 }) (Internal.Query source bindValues Decode.value) handle requestId
+                    |> Task.onError (\error -> rollbackThen handle (requestId + 1) (Task.fail error))
                     |> Task.andThen
                         (\( _, columns, rows ) ->
                             case rows of
@@ -254,9 +255,11 @@ rollbackThen handle requestId terminal =
         |> Task.mapError (\_ -> Error TransactionOutcomeUnknown "rollback acknowledgement unavailable" 0)
         |> Task.andThen (always terminal)
 
--- This constructor is retained only for exhaustiveness; public programs produce
--- TransactionSuccess/TransactionDomainFailure at their leaves.
-unsafeTransactionValue _ = unsafeTransactionValue TransactionDone
+rollbackQuiet handle requestId error =
+    Runtime.request handle (runtimeRequest requestId "rollback" True True "" [] 1 1 "" Encode.null)
+        |> Task.map (always ())
+        |> Task.onError (\_ -> Task.succeed ())
+        |> Task.andThen (\_ -> Task.fail error)
 
 exactlyOne values = case values of
     [ value_ ] -> Ok value_

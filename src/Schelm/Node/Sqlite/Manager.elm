@@ -1,4 +1,4 @@
-effect module Schelm.Node.Sqlite.Manager where { command = MyCmd } exposing (Operation, cancel, submit)
+effect module Schelm.Node.Sqlite.Manager where { command = MyCmd } exposing (Operation, cancel, close, submit)
 
 import Dict exposing (Dict)
 import Json.Encode as Encode
@@ -16,6 +16,7 @@ type Operation
 type MyCmd msg
     = Submit String Encode.Value (Operation -> Int -> Runtime.Handle -> Task Never msg) (Operation -> msg) (Operation -> msg) (Operation -> msg) (Operation -> msg)
     | Cancel Operation
+    | Close String msg
 
 
 type alias Queue a =
@@ -69,6 +70,10 @@ cancel operation =
     command (Cancel operation)
 
 
+close path succeeded =
+    command (Close path succeeded)
+
+
 cmdMap fn cmd =
     case cmd of
         Submit key options run started rejected cancelled interrupted ->
@@ -77,13 +82,16 @@ cmdMap fn cmd =
         Cancel op ->
             Cancel op
 
+        Close path succeeded ->
+            Close path (fn succeeded)
+
 
 init =
     Task.succeed { nextOperation = 1, databases = Dict.empty, owners = Dict.empty, queued = 0, ready = empty, readySet = Set.empty }
 
 
 onEffects router commands state =
-    applyCommands router commands state
+    applyCommands router (List.reverse commands) state
 
 
 applyCommands router commands state =
@@ -99,6 +107,9 @@ applyCommand router cmd state =
     case cmd of
         Cancel (Operation operationId) ->
             cancelOwned router operationId state
+
+        Close path succeeded ->
+            closeMatching router path succeeded state
 
         Submit key options run started rejected cancelled interrupted ->
             let
@@ -127,6 +138,72 @@ applyCommand router cmd state =
                                     , queued = state.queued + 1
                                 }
                     )
+
+
+closeMatching router path succeeded state =
+    let
+        keys =
+            Dict.keys state.databases
+                |> List.filter (\key -> String.startsWith (path ++ "|") key)
+    in
+    closeKeys router keys succeeded state
+
+
+closeKeys router keys succeeded state =
+    case keys of
+        [] ->
+            Platform.sendToApp router succeeded
+                |> Task.andThen (\_ -> schedule router state)
+
+        key :: rest ->
+            closeOne router key state
+                |> Task.andThen (closeKeys router rest succeeded)
+
+
+closeOne router key state =
+    case Dict.get key state.databases of
+        Nothing ->
+            Task.succeed state
+
+        Just (Pending _ queue) ->
+            settleCancelled router queue (forgetDatabase key state)
+
+        Just (Starting _ queue) ->
+            settleCancelled router queue (forgetDatabase key state)
+
+        Just (Ready _ handle _ maybeActive queue) ->
+            killActive router maybeActive (forgetDatabase key state)
+                |> Task.andThen (settleCancelled router queue)
+                |> Task.andThen (\next -> Runtime.close handle |> Task.map (always next))
+
+
+killActive router maybeActive state =
+    case maybeActive of
+        Nothing ->
+            Task.succeed state
+
+        Just active ->
+            Process.kill active.pid
+                |> Task.andThen (\_ -> Platform.sendToApp router active.job.interrupted)
+                |> Task.andThen (\_ -> Task.succeed (forget active.job.operation state))
+
+
+settleCancelled router queue state =
+    case dequeue queue of
+        Nothing ->
+            Task.succeed state
+
+        Just ( job, rest ) ->
+            Platform.sendToApp router job.cancelled
+                |> Task.andThen (\_ -> settleCancelled router rest (forget job.operation state))
+
+
+forgetDatabase key state =
+    { state
+        | databases = Dict.remove key state.databases
+        , ready = removeKey key state.ready
+        , readySet = Set.remove key state.readySet
+    }
 
 
 admit router key options job state =

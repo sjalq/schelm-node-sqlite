@@ -45,7 +45,22 @@ decodeError raw =
         Err _ -> { kind = "protocol-failure", message = "invalid runtime error", code = 0 }
 
 errorDecoder = Decode.map3 RawError (Decode.field "kind" Decode.string) (Decode.field "message" Decode.string) (Decode.field "code" Decode.int)
-responseDecoder = Decode.map5 RawResponse (Decode.field "kind" Decode.string) (Decode.field "changedRows" (Decode.oneOf [ Decode.int, Decode.succeed 0 ])) (Decode.field "lastInsertRowId" (Decode.oneOf [ Decode.string, Decode.succeed "0" ])) (Decode.field "columns" (Decode.oneOf [ Decode.list Decode.string, Decode.succeed [] ])) (Decode.field "rows" (Decode.oneOf [ Decode.list (Decode.list wireDecoder), Decode.succeed [] ]))
+
+
+-- Decode.field fails on an absent key before an inner oneOf can default it.
+-- Query/begin/commit/rollback done frames historically omitted changedRows and
+-- lastInsertRowId; wrap oneOf around field so those frames still decode.
+optionalField name decoder fallback =
+    Decode.oneOf [ Decode.field name decoder, Decode.succeed fallback ]
+
+
+responseDecoder =
+    Decode.map5 RawResponse
+        (Decode.field "kind" Decode.string)
+        (optionalField "changedRows" Decode.int 0)
+        (optionalField "lastInsertRowId" Decode.string "0")
+        (optionalField "columns" (Decode.list Decode.string) [])
+        (optionalField "rows" (Decode.list (Decode.list wireDecoder)) [])
 wireDecoder =
     Decode.field "t" Decode.string |> Decode.andThen (\tag -> case tag of
         "null" -> Decode.succeed WireNull
